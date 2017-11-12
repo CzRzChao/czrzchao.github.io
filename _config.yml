@@ -12,18 +12,18 @@ baseurl: '/'
 
 share:
   facebook: true
-  twitter: false
-  gplus: false
-  linkedin: false
-  pinterest: false
+  twitter: true
+  gplus: true
+  linkedin: true
+  pinterest: true
   email: true
 
 social:
   github: czrzchao
-  stackoverflow: ''
-  linkedin:
-  instagram: ''
-  lastfm: ''
+#  stackoverflow: ''
+#  linkedin:
+#  instagram: ''
+#  lastfm: ''
   rss: feed.xml
 
 # Google Analytics key, leave blank to ignore
