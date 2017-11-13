@@ -4,12 +4,12 @@
 # ---------------------------------------------------------------
 
 # Site
-title: NexT
-subtitle:
+title: CzRzChao
+subtitle:面向装逼编程
 description:
-author: John Doe
+author: CzRzChao
 # Support language: de, en, fr-FR, id, ja, ko, pt-BR, pt, ru, zh-Hans, zh-hk, zh-tw
-language: en
+language: zh-Hans
 date_format: '%Y-%m-%d'
 
 # URL
@@ -75,10 +75,10 @@ plugins:
 # ---------------------------------------------------------------
 
 # Put your favicon.ico into `assets/` directory.
-favicon: /assets/favicon.ico
+favicon: /images/favicon.ico
 
 # Set default keywords (Use a comma to separate)
-keywords: "Jekyll, NexT"
+keywords: "CzRzChao,web,php,redis,mysql,nginx,linux,lua,go,python"
 
 # Set rss to false to disable feed link.
 # Leave rss as empty to use site's feed link.
@@ -86,7 +86,7 @@ keywords: "Jekyll, NexT"
 rss:
 
 # Specify the date when the site was setup
-#since: 2015
+since: 2017
 
 # icon between year and author @Footer
 authoricon: heart
@@ -118,7 +118,7 @@ index_with_subtitle: false
 menu:
   home: /
   #categories: /categories/
-  #about: /about/
+  about: /about/
   archives: /archives/
   tags: /tags/
   #sitemap: /sitemap.xml
@@ -133,12 +133,12 @@ menu:
 menu_icons:
   enable: true
   #KeyMapsToMenuItemKey: NameOfTheIconFromFontAwesome
-  home: home
-  about: user
-  categories: th
+  home: 首页
+  about: 关于我
+  categories: 分类
   schedule: calendar
-  tags: tags
-  archives: archive
+  tags: 便签
+  archives: 归档
   sitemap: sitemap
   commonweal: heartbeat
 
@@ -150,9 +150,9 @@ menu_icons:
 # ---------------------------------------------------------------
 
 # Schemes
-scheme: Muse
+#scheme: Muse
 #scheme: Mist
-#scheme: Pisces
+scheme: Pisces
 
 
 # ---------------------------------------------------------------
@@ -214,6 +214,7 @@ font:
 # Value is the target link (E.g. GitHub: https://github.com/iissnan)
 #social:
   #LinkLabel: Link
+  GitHub: https://github.com/CzRzChao
 
 
 # Social Links Icons
@@ -226,13 +227,13 @@ social_icons:
   # Icon Mappings.
   # KeyMapsToSocialItemKey: NameOfTheIconFromFontAwesome
   GitHub: github
-  Twitter: twitter
-  Weibo: weibo
+  #Twitter: twitter
+  #Weibo: weibo
 
 
 # Sidebar Avatar
 # in directory: /assets/images/avatar.gif
-#avatar:
+avatar: /images/avatar.JPG
 
 
 # Table Of Contents in the Sidebar
@@ -255,8 +256,8 @@ toc:
 
 sidebar:
   # Sidebar Position, available value: left | right
-  position: left
-  #position: right
+  #position: left
+  position: right
 
   # Sidebar Display, available value:
   #  - post    expand on posts automatically. Default.
@@ -352,7 +353,7 @@ custom_logo:
 # Available value:
 #    normal | night | night eighties | night blue | night bright
 # https://github.com/chriskempson/tomorrow-theme
-highlight_theme: normal
+highlight_theme: night eighties
 
 
 # ---------------------------------------------------------------
@@ -487,7 +488,7 @@ rating:
 # Show number of visitors to each article.
 # You can visit https://leancloud.cn get AppID and AppKey.
 leancloud_visitors:
-  enable: false
+  enable: true
   app_id: #<app_id>
   app_key: #<app_key>
 
@@ -686,7 +687,7 @@ vendors:
 
   # Internal version: 1.0.0
   # https://github.com/zproo/canvas-ribbon
-  canvas_ribbon:
+  canvas_ribbon: true
 
   # Internal version: 3.3.0
   # https://github.com/ethantw/Han
@@ -700,3 +701,7 @@ images: assets/images
 
 # Theme version
 version: 5.1.1
+
+reward_comment: 微信打赏还是要有的，说不定您觉得我的逼装的还不错呢？！
+wechatpay: /images/wechat_reward.jpeg
+#alipay: /images/alipay_rewar.jpeg
