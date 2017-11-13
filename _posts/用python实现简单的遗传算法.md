@@ -1,8 +1,10 @@
 ---
 title: 用python实现简单的遗传算法
 date: 2013-12-24 23:31:30
-categories: python
-tags: python,算法
+categories: 
+- python
+tags: 
+- python,算法
 ---
 
 今天整理之前写的代码，发现在做数模期间写的用python实现的遗传算法，感觉还是挺有意思的，就拿出来分享一下。  
