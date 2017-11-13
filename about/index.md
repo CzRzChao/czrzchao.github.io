@@ -10,4 +10,4 @@ layout: page
 
 #联系我
 > QQ:358055120  
-> EMAIL:chaoyi_wu@163.com
+> email:wu_chaoyi@163.com
