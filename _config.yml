@@ -78,7 +78,7 @@ plugins:
 favicon: /images/favicon.ico
 
 # Set default keywords (Use a comma to separate)
-keywords: "CzRzChao,web,php,redis,mysql,nginx,linux,lua,go,python"
+keywords: "CzRzChao,web,php,redis,mysql,python"
 
 # Set rss to false to disable feed link.
 # Leave rss as empty to use site's feed link.
@@ -489,8 +489,8 @@ rating:
 # You can visit https://leancloud.cn get AppID and AppKey.
 leancloud_visitors:
   enable: true
-  app_id: #<app_id>
-  app_key: #<app_key>
+  app_id: 3knAYvjc37mSBudV5WnIB0fY-gzGzoHsz
+  app_key: HpTP51dgqD6imV4VL3eUCTYe
 
 # Show PV/UV of the website/page with busuanzi.
 # Get more information on http://ibruce.info/2015/04/04/busuanzi/
