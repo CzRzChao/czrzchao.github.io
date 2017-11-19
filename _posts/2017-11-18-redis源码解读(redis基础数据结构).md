@@ -43,7 +43,7 @@ struct sdshdr {
 };
 
 // >=3.2
-struct __attribute__ ((__packed__)) sdshdr5 {   // 没用！！！
+struct __attribute__ ((__packed__)) sdshdr5 {
     unsigned char flags; /* 3 lsb of type, and 5 msb of string length */
     char buf[];
 };
@@ -87,11 +87,12 @@ static inline char sdsReqType(size_t string_size) { // 获取类型
     return SDS_TYPE_64;
 }
 ```  
+需要注意的是，*redis* 并不会使用`SDS_TYPE_5`类型作为**SDS**字符串的类型，所有
 那么`__attribute__ ((__packed__))`又是什么呢？首先就要了解内存对齐的默认策略：
 > struct的内存是内部最大元素的整数倍  
 
 如果内存不对齐，cpu的的内存访问速度会大大下降，至于内存对齐的原理这里就不做赘述了，有兴趣可以自行google或百度。  
-而`__attribute__ ((__packed__))`这个操作符就是用来消除内存对齐的，强制对齐1，效果如下：
+而`__attribute__ ((__packed__))`这个声明就是用来告诉编译器取消内存对齐优化，按照实际的占用字节数进行对齐，效果如下：
 
 ```c
 printf("%ld\n", sizeof(struct sdshdr));   // 8
@@ -100,7 +101,7 @@ printf("%ld\n", sizeof(struct sdshdr16)); // 5
 printf("%ld\n", sizeof(struct sdshdr32)); // 9
 printf("%ld\n", sizeof(struct sdshdr64)); // 17
 ```
-可以看到跟`sdshdr`同量级的`sdshdr16`比之前节省了3个字节的内存，效果显著。  
+通过加上`__attribute__ ((__packed__))`声明，`sdshdr16`节省了1个字节，`sdshdr32`节省了3个字节，`sdshdr64`节省了7个字节。 
 但是内存对齐怎么办呢，不能为了一点内存大大拖慢cpu的寻址效率啊？*redis* 通过自己在malloc等c语言传统的内存分配函数上封装了一层**zmalloc**解决了内存对齐的问题，其中在内存分配前有这么一段代码：
 
 ```c
@@ -118,7 +119,7 @@ if (_n&(sizeof(long)-1)) _n += sizeof(long)-(_n&(sizeof(long)-1)); \    // 确�
 * `flags`记录了当前字节数组的属性、用来标识到底是`sdshdr8`还是`sdshdr16`等
 * `buf`保存了字符串真正的值以及末尾的一个`\0`
 
-除此之外，需要注意的是整个**SDS**的内存是连续的，统一开辟的。为何要统一开辟呢？因为在大多数操作中，`buf`内的字符串实体才是操作对象。如果统一开辟内存就能通过`buf`头指针进行寻址，拿到整个`struct`的指针，而且通过`buf`的头指针减一直接就能获取`flags`的值，骚操作代码如下！
+整个**SDS**的内存是连续的，统一开辟的。为何要统一开辟呢？因为在大多数操作中，`buf`内的字符串实体才是操作对象。如果统一开辟内存就能通过`buf`头指针进行寻址，拿到整个`struct`的指针，而且通过`buf`的头指针减一直接就能获取`flags`的值，骚操作代码如下！
 
 ```c
 // flags值的定义
@@ -137,8 +138,69 @@ unsigned char flags = s[-1];
 ```
 至于`buf`末尾的`\0`是为了复用`string.h`中部分字符串操作函数。
 
+## 创建SDS
+这块比较直白易懂，直接show源码：
+
+```c
+sds sdsnewlen(const void *init, size_t initlen) {   // 创建sds
+    void *sh;
+    sds s;  // 指向字符串头指针
+    char type = sdsReqType(initlen);
+    if (type == SDS_TYPE_5 && initlen == 0) type = SDS_TYPE_8;  // 如果是空字符串直接使用SDS_TYPE_8，方便后续拼接
+    int hdrlen = sdsHdrSize(type);
+    unsigned char *fp; /* flags pointer. */
+
+    sh = s_malloc(hdrlen+initlen+1);    // 分配空间大小为 sdshdr大小+字符串长度+1
+    if (!init)
+        memset(sh, 0, hdrlen+initlen+1);    // 初始化内存空间
+    if (sh == NULL) return NULL;
+    s = (char*)sh+hdrlen;
+    fp = ((unsigned char*)s)-1; // 获取flags指针
+    switch(type) {
+        case SDS_TYPE_5: {
+            *fp = type | (initlen << SDS_TYPE_BITS);    // sdshdr5的前5位保存长度，后3位保存type
+            break;
+        }
+        case SDS_TYPE_8: {
+            SDS_HDR_VAR(8,s);       // 获取sdshdr指针
+            sh->len = initlen;      // 设置len
+            sh->alloc = initlen;    // 设置alloc
+            *fp = type; // 设置type
+            break;
+        }
+        case SDS_TYPE_16: {
+            SDS_HDR_VAR(16,s);
+            sh->len = initlen;
+            sh->alloc = initlen;
+            *fp = type;
+            break;
+        }
+        case SDS_TYPE_32: {
+            SDS_HDR_VAR(32,s);
+            sh->len = initlen;
+            sh->alloc = initlen;
+            *fp = type;
+            break;
+        }
+        case SDS_TYPE_64: {
+            SDS_HDR_VAR(64,s);
+            sh->len = initlen;
+            sh->alloc = initlen;
+            *fp = type;
+            break;
+        }
+    }
+    if (initlen && init)
+        memcpy(s, init, initlen);   // 内存拷贝字字符数组赋值
+    s[initlen] = '\0';  // 字符数组最后一位设为\0
+    return s;
+}
+```
+由于`sdshdr5`的只用来存储长度为32字节以下的字符数组，因此flags的5个bit就能满足长度记录，加上type所需的3bit，刚好为8bit一个字节，因此`sdshdr5`不需要单独的`len`记录长度，并且只有32个字节的存储空间，动态的变更内存余地较小，所以 *redis* 直接不存储`alloc`，当`sdshdr5`需要扩展时会直接变更成更大的**SDS**数据结构。  
+除此之外，**SDS**都会多分配1个字节用来保存`'\0'`。
+
 ## SDS拼接
-说完了**SDS**的定义，来说一下一些主要的**SDS**操作，其中最有代表性的就是**SDS**的拼接方法`sdscatlen`，直接上代码。
+**SDS**的拼接函数`sdscatlen`和C语言的`strcat`有着很大的出入，直接上代码：
 
 ```c
 sds sdscatlen(sds s, const void *t, size_t len) {
@@ -175,10 +237,7 @@ sds sdsMakeRoomFor(sds s, size_t addlen) {  // 确保sds字符串在拼接时有
 
     type = sdsReqType(newlen);  // 获取新字符串的sds类型
 
-    /* Don't use type 5: the user is appending to the string and type 5 is
-     * not able to remember empty space, so sdsMakeRoomFor() must be called
-     * at every appending operation. */
-    if (type == SDS_TYPE_5) type = SDS_TYPE_8;
+    if (type == SDS_TYPE_5) type = SDS_TYPE_8;  // 如果type为SDS_TYPE_5直接优化成SDS_TYPE_8
 
     hdrlen = sdsHdrSize(type);
     if (oldtype==type) {
@@ -200,17 +259,18 @@ sds sdsMakeRoomFor(sds s, size_t addlen) {  // 确保sds字符串在拼接时有
     return s;
 }
 ```
-该方法是用来确保**SDS**字符串在拼接时有足够的空间，如果空间不够就会重新分配内存，通过源码可以看到内存的预分配策略主要有两种：
+该方法是用来确保**SDS**字符串在拼接时有足够的空间，如果空间不够就会重新分配内存，但是分配内存并不是只分配当下要用的内存，而是采用了冗余的预分配内存，通过源码可以看到内存的预分配策略主要有两种：
 
 1. 拼接后的字符串长度不超过1M，分配两倍的内存
 2. 拼接够的字符串长度超过1M，多分配1M的内存   
 
 通过这两种策略，在字符串拼接时会预分配一部分内存，下次拼接的时候就可能不再需要进行内存分配了，将原本N次字符串拼接需要N次内存重新分配的次数优化到最多需要N次，是典型的空间换时间的做法。  
 当然，如果新的字符串长度超过了原有字符串类型的限定那么还会涉及到一个重新生成`sdshdr`的过程。  
-除此之外，在上述的内存分配基础上，**SDS**都会多分配1个字节用来保存`'\0'`。
+
+还有一个细节需要注意，由于`sdshrd5`并不存储`alloc`值，因此无法获取`sdshrd5`的可用大小，如果继续采用`sdshrd5`进行存储，在之后的拼接过程中每次都还是要进行内存重分配。因此在发生拼接行为时，`sdshrd5`会被直接优化成`sdshrd8`。
 
 ## SDS惰性空间释放
-在正常的字符串缩短操作中，多余出来的空间并不会直接释放，而是保留这部分空间，待以后再用。以sdstrim为例：
+在`SDS`的字符串缩短操作中，多余出来的空间并不会直接释放，而是保留这部分空间，待以后再用。以`sdstrim`为例：
 
 ```c
 sds sdstrim(sds s, const char *cset) {  // sds trim操作
