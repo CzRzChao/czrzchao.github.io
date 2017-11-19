@@ -16,10 +16,10 @@ tags:
 
 1. [**SDS(simple dynamic string)**：简单动态字符串](#sds)
 2. [**ADList(A generic doubly linked list)**：双向链表](#adlist)
-3. **dict(Hash Tables)**：字典
-4. **intset**：整数结合
-5. **quicklist**：快速列表，双向链表和压缩表二合一的复杂数据结构
-6. **zpilist**：跳跃链表
+3. [**dict(Hash Tables)**：字典](#dict)
+4. [**intset**：整数结合](#intset)
+5. [**quicklist**：快速列表，双向链表和压缩表二合一的复杂数据结构](#quicklist)
+6. [**ziplist**：跳跃链表](#ziplist)
 7. **zipmap**：跳跃图（*redis* 3.2.9中并没有被使用到）
 
 ***
@@ -338,7 +338,7 @@ typedef struct list {
 1. 双向：可以灵活的访问前置或者后置节点
 2. `list`头指针和尾指针：可以方便的获取头尾节点或者从头尾遍历查找
 3. `len`：使获取`list`由*O(N)*变为*O(1)*
-4. 通过`void`实现多态：不同的实例化链表对象可以持有不同的值，其对应的3个操作函数也可以自定义
+4. 通过`void`实现多态：不同的实例化链表对象可以持有不同的值，其对应的3个操作函数也可以自定义，是不是有点`interface`的感觉！
 
 ## 链表迭代器
 除了双向链表的定义外，*redis* 还定义了一个迭代器，用于遍历链表：
@@ -384,3 +384,201 @@ listNode *listSearchKey(list *list, void *key)  // list查找key
 `ADList`相关的定义都在`adlist.h`和`adlist.c`文件中，感兴趣的同学可以自行查看
 
 ***
+# dict
+`dict`顾名思义就是字典，也就是保存一种键值对的数据结构。每个键都是唯一的，不同的键可以映射到不同的值上。在很多的高级编程语言中都实现了这一数据结构。例如`php`的`array`，`python`的字典。  
+`redis`的数据库就是用字典实现的，所有增删改查操作也是构建在`dict`的操作之上。
+## 字典的定义
+首先是字典的节点：
+
+```c
+typedef struct dictEntry {
+    void *key;  // 键
+    union {
+        void *val;
+        uint64_t u64;
+        int64_t s64;
+        double d;
+    } v;    // 值
+    struct dictEntry *next; // 拉链法解决冲突，下一个节点
+} dictEntry;
+```
+当存在相同hash值的节点时，采用拉链法解决冲突。  
+字典节点的`val`为一个联合，可以是指针、`uint64_t`、`int64_t`或者是`double`。
+
+有了节点后需要一个hash表将节点聚合
+
+```c
+typedef struct dictht { // hash表
+    dictEntry **table;  // 节点数组
+    unsigned long size; // hash表大小
+    unsigned long sizemask; // hash表掩码，等于size-1，用于计算hash值
+    unsigned long used; // 已有节点数量
+} dictht;
+```
+* `table`是一个数组，每一个元素都指向一个字典节点
+* `size`保存了当前hash表的大小
+* `sizemask`为hash表的掩码，用于计算不同的key的hash值，且等于size-1
+* `used`记录了已有节点的数量
+
+有了这两个数据结构以后实际上就能实现一个简单的字典了，但是同`ADList`一样，*redis* 对`dictht`又封装了一层，使的字典的操作更加方便规范。并且字典的`rehash`也是基于这一层的定义实现的，如果不清楚什么是`rehash`不用急，继续看下去你就明白了：
+
+```c
+typedef struct dict {   // 字典
+    dictType *type; // 各种字典操作方法
+    void *privdata; // 私有数据，用于传给操作函数
+    dictht ht[2];   // 两个hash表，一个用来存储当前使用的，一个用来rehash
+    long rehashidx; // rehash标志位，用于判断是否在rehash和记录rehash进度
+    int iterators;  // 迭代器的迭代进度
+} dict;
+```
+* `type`保存了各种字典操作方法，其结构体如下：
+
+	```c
+	typedef struct dictType {   // 各种字典操作
+    unsigned int (*hashFunction)(const void *key);  // 计算hash值的函数
+    void *(*keyDup)(void *privdata, const void *key);   // 键复制
+    void *(*valDup)(void *privdata, const void *obj);   // 值复制
+    int (*keyCompare)(void *privdata, const void *key1, const void *key2);  // 键比较
+    void (*keyDestructor)(void *privdata, void *key);   // 键销毁
+    void (*valDestructor)(void *privdata, void *obj);   // 值销毁
+	} dictType;
+	```
+* `private`为调用操作方法时需要传入的一些私有数据，大多数情况为NULL
+* `ht[2]`这是 *redis* 字典和常见一些高级编程语言中的hash表的实现最不相同的地方，下面会细说
+* `rehashidx`rehash的标志位，记录rehash的进度
+* `iterators` *redis* 字典也实现了自己的迭代器，用于遍历，该变量用于记录迭代器的迭代进度  
+
+## 字典的初始化及新增键值对
+### 字典初始化
+有了字典的定义之后，我们来梳理一下字典的初始化及插入键值对的流程。首先是初始化：
+
+```c
+dict *dictCreate(dictType *type, void *privDataPtr) {   // 创建字典
+    dict *d = zmalloc(sizeof(*d));
+
+    _dictInit(d,type,privDataPtr);
+    return d;
+}
+
+int _dictInit(dict *d, dictType *type, void *privDataPtr) { // 字典初始化
+    _dictReset(&d->ht[0]);
+    _dictReset(&d->ht[1]);
+    d->type = type;
+    d->privdata = privDataPtr;
+    d->rehashidx = -1;
+    d->iterators = 0;
+    return DICT_OK;
+}
+```
+上面两段代码很简单，就是字典的初始化过程，初始化之后我们就有了一个空的`dict`指针。现在需要往这个空的`dict`中插入键值对了。
+
+### 新增键值对
+*redis* 提供了`dictAdd`函数用于往字典中新增一条记录：
+
+```c
+int dictAdd(dict *d, void *key, void *val)  // 新增一个键值对
+{
+    dictEntry *entry = dictAddRaw(d,key);   // 增加一个entry
+
+    if (!entry) return DICT_ERR;
+    dictSetVal(d, entry, val);  // 设置值
+    return DICT_OK;
+}
+
+dictEntry *dictAddRaw(dict *d, void *key)   // 新增一个entry
+{
+    int index;
+    dictEntry *entry;
+    dictht *ht;
+
+    if (dictIsRehashing(d)) _dictRehashStep(d); // 如果在rehash执行一步rehash
+
+    /* Get the index of the new element, or -1 if
+     * the element already exists. */
+    if ((index = _dictKeyIndex(d, key)) == -1)  // 获取当前key的hash值，如果存在直接返回NULL
+        return NULL;
+
+    ht = dictIsRehashing(d) ? &d->ht[1] : &d->ht[0];    // rehash直接插入到rehash的hash中
+    entry = zmalloc(sizeof(*entry));    // 分配内存
+    entry->next = ht->table[index];
+    ht->table[index] = entry;       // 插入到index头部
+    ht->used++; // 已用数量自增
+
+    /* Set the hash entry fields. */
+    dictSetKey(d, entry, key);  // 设置key
+    return entry;
+}
+```
+我们先不care各种`rehash`的判断和操作，`dict`的新增元素主要分为两步，先根据key新增一个`entry`，然后再将具体的值设置到这个`entry`中。上述的代码还是比计较好理解的，无非就是获取`hash`值和内存分配，设置键值。这块的重点在`_dictKeyIndex`函数中：
+
+```c
+static int _dictKeyIndex(dict *d, const void *key)  // 获取hash index 如果存在返回-1
+{
+    unsigned int h, idx, table;
+    dictEntry *he;
+
+    /* Expand the hash table if needed */
+    if (_dictExpandIfNeeded(d) == DICT_ERR) // 在需要扩展dict
+        return -1;
+    /* Compute the key hash value */
+    h = dictHashKey(d, key);    // 根据hash算法计算key对应的hash值
+    for (table = 0; table <= 1; table++) {  // 在两个hash表中查找是否存在相同key
+        idx = h & d->ht[table].sizemask;    // 通过&hash表掩码，将对应key散列到hash表中
+        /* Search if this slot does not already contain the given key */
+        he = d->ht[table].table[idx];
+        while(he) {
+            if (key==he->key || dictCompareKeys(d, key, he->key))
+                return -1;
+            he = he->next;
+        }
+        if (!dictIsRehashing(d)) break; // 如果没有在rehash阶段直接break
+    }
+    return idx;
+}
+```
+在`_dictKeyIndex`函数中主要做了三件事：
+
+1. `_dictExpandIfNeeded`：在需要的时候扩展`dict`
+2. `dictHashKey`：计算key对应的hash值
+3. 在字典中查找是否存在相同的key
+
+后两者都没什么好说的，主要是在`_dictExpandIfNeeded`函数中：
+
+```c
+#define DICT_HT_INITIAL_SIZE     4  // hash初始大小
+
+static int _dictExpandIfNeeded(dict *d) // 在必要时扩展字典
+{
+    /* Incremental rehashing already in progress. Return. */
+    if (dictIsRehashing(d)) return DICT_OK; // 如果已经在rehash直接返回
+
+    /* If the hash table is empty expand it to the initial size. */
+    if (d->ht[0].size == 0) return dictExpand(d, DICT_HT_INITIAL_SIZE); // 如果是第一次新增直接扩展为4
+
+   	// 省略rehash相关...
+    return DICT_OK;
+}
+```
+由于字典是第一次新增，因此hash表直接被扩展为初始化大小4，如果我们再插入一组键值对，字典的结构就如下图所示：
+
+![sdshdr8](/images/dict.png)  
+
+以上就是字典初始化后新增的函数调用流程，这里不对具体的hash算法做解读，感兴趣的同学可以自己去了解。
+
+### rehash
+随着操作的不断执行，hash表保存的键值对会逐渐的增多或者减少，这时就会暴露一些问题。如果hash表很大，但是键值对太少，也就是hash表的负载因子(`dictht->used`/`dictht->size`)太小，就会有大量的内存浪费；如果hash表的负载因子太大，就会影响字典的查找效率。这时候就需要进行rehash将hash表的负载因子控制在一个合理的范围。
+
+
+
+# intset
+
+
+
+
+# quicklist
+
+
+
+
+
+# ziplist
