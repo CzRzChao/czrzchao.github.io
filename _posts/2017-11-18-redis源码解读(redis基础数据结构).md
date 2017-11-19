@@ -8,7 +8,7 @@ tags:
 - 源码
 ---
 
-近来在研读redis3.2.9的源码，虽然网上已有许多redis的源码解读文章，但大都不成系统，且纸上学来终觉浅，遂有该系列博文。
+近来在研读redis3.2.9的源码，虽然网上已有许多redis的源码解读文章，但大都不成系统，且纸上学来终觉浅，遂有该系列博文。部分知识点参照了黄建宏老师的《Redis设计与实现》。
 
 # 前言
 本文探究的数据结构并不是 *redis* 对外暴露的5种数据结构，而是*redis*内部使用的基础数据结构，这些基础的数据结构 *redis* 不仅和 *redisObj* 一起构成了对外暴露的5种数据结构，还被运用于 *redis* 内部的各种存储和逻辑交互，支撑起了 *redis* 的运行。  
@@ -87,22 +87,20 @@ static inline char sdsReqType(size_t string_size) { // 获取类型
     return SDS_TYPE_64;
 }
 ```  
-需要注意的是，*redis* 并不会使用`SDS_TYPE_5`类型作为**SDS**字符串的类型，所有
-那么`__attribute__ ((__packed__))`又是什么呢？首先就要了解内存对齐的默认策略：
-> struct的内存是内部最大元素的整数倍  
+`__attribute__ ((__packed__))`是什么呢？首先就要了解编译器内存对齐的优化策略：
+> struct的分配的内存是内部最大元素的整数倍  
 
 如果内存不对齐，cpu的的内存访问速度会大大下降，至于内存对齐的原理这里就不做赘述了，有兴趣可以自行google或百度。  
 而`__attribute__ ((__packed__))`这个声明就是用来告诉编译器取消内存对齐优化，按照实际的占用字节数进行对齐，效果如下：
 
 ```c
-printf("%ld\n", sizeof(struct sdshdr));   // 8
 printf("%ld\n", sizeof(struct sdshdr8));  // 3
 printf("%ld\n", sizeof(struct sdshdr16)); // 5
 printf("%ld\n", sizeof(struct sdshdr32)); // 9
 printf("%ld\n", sizeof(struct sdshdr64)); // 17
 ```
 通过加上`__attribute__ ((__packed__))`声明，`sdshdr16`节省了1个字节，`sdshdr32`节省了3个字节，`sdshdr64`节省了7个字节。 
-但是内存对齐怎么办呢，不能为了一点内存大大拖慢cpu的寻址效率啊？*redis* 通过自己在malloc等c语言传统的内存分配函数上封装了一层**zmalloc**解决了内存对齐的问题，其中在内存分配前有这么一段代码：
+但是内存对齐怎么办呢，不能为了一点内存大大拖慢cpu的寻址效率啊？*redis* 通过自己在malloc等c语言内存分配函数上封装了一层**zmalloc**，将内存分配收敛，并解决了内存对齐的问题。在内存分配前有这么一段代码：
 
 ```c
 if (_n&(sizeof(long)-1)) _n += sizeof(long)-(_n&(sizeof(long)-1)); \    // 确保内存对齐！
@@ -306,3 +304,83 @@ sds sdstrim(sds s, const char *cset) {  // sds trim操作
 
 ***
 # ADList
+**ADList(A generic doubly linked list)**是 *redis* 自定义的一种双向链表，广泛运用于 *redisClients* 、 *redisServer* 、发布订阅、慢查询、监视器等（注：3.0及以前还会被运用于`list`结构中，在3.2以后被`quicklist`取代）。  
+链表是最常用的数据结构之一了，对于其算法和ADT就不做赘述，不了解的同学可以google、百度或者参考《数据结构：C语言版》等书籍。
+
+## 链表和链表节点定义
+每个链表节点都是用一个`listNode`表示
+
+```c
+typedef struct listNode {   // 双向节点
+    struct listNode *prev;
+    struct listNode *next;
+    void *value;    // 空指针，可以被指向任何类型
+} listNode;
+```
+在简单的链表定义中，只用节点结构就已经能够满足链表的需求了，但是 *redis* 通过`list`结构体持有链表，使得链表操作更加方便、规范。
+
+```c
+typedef struct list {
+    listNode *head;		// 头指针
+    listNode *tail;		// 尾指针
+    void *(*dup)(void *ptr);    // 复制函数
+    void (*free)(void *ptr);    // 节点释放函数
+    int (*match)(void *ptr, void *key); // 对比函数函数
+    unsigned long len;  // list长度
+} list;
+```
+* `dup`为节点复制函数
+* `free`为节点释放函数
+* `match`为节点比较函数
+
+通过这样的定义，`adlist`有了以下优点：
+
+1. 双向：可以灵活的访问前置或者后置节点
+2. `list`头指针和尾指针：可以方便的获取头尾节点或者从头尾遍历查找
+3. `len`：使获取`list`由*O(N)*变为*O(1)*
+4. 通过`void`实现多态：不同的实例化链表对象可以持有不同的值，其对应的3个操作函数也可以自定义
+
+## 链表迭代器
+除了双向链表的定义外，*redis* 还定义了一个迭代器，用于遍历链表：
+
+```c
+typedef struct listIter {   // 列表迭代器
+    listNode *next;
+    int direction;  // 迭代器遍历方向
+} listIter;
+```
+其中`direction`用于标识迭代器的遍历方向：
+
+```c
+#define AL_START_HEAD 0     // 从头遍历
+#define AL_START_TAIL 1     // 从尾遍历
+```
+通过定义`listIter`，*redis* 在需要遍历`list`时，不需要再复制各种tmp值，只需要调用`listIter`的遍历函数。
+以`listSearchKey`为例：
+
+```c
+listNode *listSearchKey(list *list, void *key)  // list查找key
+{
+    listIter iter;
+    listNode *node;
+
+    listRewind(list, &iter);    // 初始化迭代器
+    while((node = listNext(&iter)) != NULL) {   // 迭代器遍历
+        if (list->match) {  // 如果定义了match函数
+            if (list->match(node->value, key)) {
+                return node;
+            }
+        } else {    // 直接进行值比较
+            if (key == node->value) {
+                return node;
+            }
+        }
+    }
+    return NULL;
+}
+```
+所有和遍历有关的行为都收敛到了`listIter`中，`list`就专注负责存储。  
+
+`ADList`相关的定义都在`adlist.h`和`adlist.c`文件中，感兴趣的同学可以自行查看
+
+***
