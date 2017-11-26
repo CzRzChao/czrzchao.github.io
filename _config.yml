@@ -281,12 +281,13 @@ sidebar:
 
 
 # Blog rolls
-#links_title: Links
-#links_layout: block
+links_title: 友情链接
+links_layout: block
 #links_layout: inline
-#links:
+links:
   #Title: http://example.com/
-
+  老想着做后端的fe: http://lijundong.com
+  专注于现代php的geek: http://xuwenzhi.com
 
 # ---------------------------------------------------------------
 # Post Settings
@@ -373,7 +374,7 @@ han: false
 #swiftype_key:
 
 # Baidu Analytics ID
-#baidu_analytics:
+baidu_analytics: a422e171099fdcd98c86c11fe62f6141
 
 # Duoshuo ShortName
 #duoshuo_shortname:
