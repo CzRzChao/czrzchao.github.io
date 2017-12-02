@@ -7,7 +7,7 @@ tags:
 - redis源码解析
 ---
 
-近来在研读redis3.2.9的源码，虽然网上已有许多redis的源码解读文章，但大都不成系统，且纸上学来终觉浅，遂有该系列博文。部分知识点参照了黄建宏老师的《Redis设计与实现》。
+近来在研读redis3.2.9的源码，虽然网上已有许多redis的源码解读文章，但大都不成系统，且纸上学来终觉浅，遂有该系列博文。部分知识点参照了黄建宏的《Redis设计与实现》。
 
 # 前言
 本文探究的数据结构并不是 *redis* 对外暴露的5种数据结构，而是*redis*内部使用的基础数据结构，这些基础的数据结构 *redis* 不仅和 *redisObj* 一起构成了对外暴露的5种数据结构，还被运用于 *redis* 内部的各种存储和逻辑交互，支撑起了 *redis* 的运行。  
@@ -203,7 +203,7 @@ REDIS_STATIC int __quicklistCompressNode(quicklistNode *node) { // 压缩节点
 
 
 ## 总结一波
-`quicklist`除了常用的增删改查外还提供了merge、将`ziplist`转换为`quicklist`等api，这里就不详解了，可以具体查看`quicklist.h`和`quicklist.c`两个文件。
+`quicklist`除了常用的增删改查外还提供了merge、将`ziplist`转换为`quicklist`等api，这里就不详解了，可以具体查看`quicklist.h`和`quicklist.c`文件。
 
 1. `quicklist`是 *redis* 在`ziplist`和`adlist`两种数据结构的基础上融合而成的一个实用的复杂数据结构
 2. `quicklist`在3.2之后取代`adlist`和`ziplist`作为`list`的基础数据类型
