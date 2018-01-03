@@ -178,7 +178,8 @@ robj *createQuicklistObject(void) {
     return o;
 }
 ```
-由于只有一种编码，也就没有编码转换等繁琐的操作了。
+由于只有一种编码，也就没有编码转换等繁琐的操作了。相关的api也都是对quicklist的简单封装，就不对其源码进行解读了。
+
 > list相关api文档可见：[redis文档](http://www.redis.cn/commands.html#list)
 
 具体api源码在`t_list.c`中
