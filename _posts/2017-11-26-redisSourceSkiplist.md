@@ -14,12 +14,12 @@ tags:
 本文探究的数据结构并不是 *redis* 对外暴露的5种数据结构，而是*redis*内部使用的基础数据结构，这些基础的数据结构 *redis* 不仅和 *redisObj* 一起构成了对外暴露的5种数据结构，还被运用于 *redis* 内部的各种存储和逻辑交互，支撑起了 *redis* 的运行。  
 *redis* 的基础数据结构主要有以下7种：  
 
-1. [**SDS(simple dynamic string)**：简单动态字符串](/redis/2017/11/14/redisSourceSds#sds)
-2. [**ADList(A generic doubly linked list)**：双向链表](/redis/2017/11/16/redisSourceAdlist#adlist)
-3. [**dict(Hash Tables)**：字典](/redis/2017/11/18/redisSourceDict#dict)
-4. [**intset**：整数结合](/redis/2017/11/19/redisSourceIntset#intset)
-5. [**ziplist**：压缩表](/redis/2017/11/24/redisSourceZiplist#ziplist)
-6. [**quicklist**：快速列表（双向链表和压缩表二合一的复杂数据结构）](/redis/2017/11/25/redisSourceQuicklist#quicklist)
+1. [**SDS(simple dynamic string)**：简单动态字符串](https://czrzchao.github.io/redisSourceSds#sds)
+2. [**ADList(A generic doubly linked list)**：双向链表](https://czrzchao.github.io/redisSourceAdlist#adlist)
+3. [**dict(Hash Tables)**：字典](https://czrzchao.github.io/redisSourceDict#dict)
+4. [**intset**：整数结合](https://czrzchao.github.io/redisSourceIntset#intset)
+5. [**ziplist**：压缩表](https://czrzchao.github.io/redisSourceZiplist#ziplist)
+6. [**quicklist**：快速列表（双向链表和压缩表二合一的复杂数据结构）](https://czrzchao.github.io/redisSourceQuicklist#quicklist)
 7. [**skiplist**：跳跃链表](#skiplist)
 
 
