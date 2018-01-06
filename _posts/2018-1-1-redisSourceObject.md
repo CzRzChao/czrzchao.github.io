@@ -15,6 +15,7 @@ tags:
 首先看看 *redisObject* 的定义：  
 
 ```c
+#define LRU_BITS 24
 typedef struct redisObject {    // redis对象
     unsigned type:4;    // 类型,4bit
     unsigned encoding:4;    // 编码,4bit
@@ -38,28 +39,22 @@ typedef struct redisObject {    // redis对象
 | OBJ\_ZSET   | OBJ\_ENCODING\_ZIPLIST   | 使用压缩列表实现的有序集合对象 |
 | OBJ\_ZSET   | OBJ\_ENCODING\_SKIPLIST  | 使用跳跃表实现的有序集合对象  |
 
-*lru* 用于保存对象的LRU时钟或LFU的频次  
+*lru* 用于保存对象的LRU时钟  
 *refcount* 为对象的引用计数，redisObject都是通过简单的引用计数法进行垃圾回收  
 *ptr* 保存了指向各种底层数据实例的指针
 
 # 对象创建
 
 ```c
-// 创建对象
-robj *createObject(int type, void *ptr) {
+robj *createObject(int type, void *ptr) {   // 创建一个对象
     robj *o = zmalloc(sizeof(*o));
     o->type = type;
     o->encoding = OBJ_ENCODING_RAW;
     o->ptr = ptr;
     o->refcount = 1;
 
-    /* Set the LRU to the current lruclock (minutes resolution), or
-     * alternatively the LFU counter. */
-    if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) { // 如果是采用LFU策略
-        o->lru = (LFUGetTimeInMinutes()<<8) | LFU_INIT_VAL;
-    } else {    // lru记录具体的lru时钟
-        o->lru = LRU_CLOCK();
-    }
+    /* Set the LRU to the current lruclock (minutes resolution). */
+    o->lru = LRU_CLOCK();   // LRU时钟
     return o;
 }
 ```
@@ -198,33 +193,18 @@ robj *createHashObject(void) {
 以`hset`命令为例，探究一波hash对象的一些编码策略和存储规则
 
 ```c
-void hsetCommand(client *c) {   // hset和hmset
-    int i, created = 0;
+void hsetCommand(client *c) {
+    int update;
     robj *o;
 
-    if ((c->argc % 2) == 1) {   // 参数数量判断
-        addReplyError(c,"wrong number of arguments for HMSET");
-        return;
-    }
-
-    if ((o = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;    // 获取hash表，不存在就创建
-    hashTypeTryConversion(o,c->argv,2,c->argc-1);   // 尝试转换hash对象编码
-
-    for (i = 2; i < c->argc; i += 2)
-        created += !hashTypeSet(o,c->argv[i]->ptr,c->argv[i+1]->ptr,HASH_SET_COPY); // 添加hash数据
-
-    /* HMSET (deprecated) and HSET return value is different. */
-    char *cmdname = c->argv[0]->ptr;    // 获取操作命令
-    if (cmdname[1] == 's' || cmdname[1] == 'S') {
-        /* HSET */
-        addReplyLongLong(c, created);   // 通知客户端
-    } else {
-        /* HMSET */
-        addReply(c, shared.ok); // 通知客户端
-    }
+    if ((o = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
+    hashTypeTryConversion(o,c->argv,2,3);   // 尝试转换hash编码类型
+    hashTypeTryObjectEncoding(o,&c->argv[2], &c->argv[3]);
+    update = hashTypeSet(o,c->argv[2],c->argv[3]);  // update 0为新增 1位更新
+    addReply(c, update ? shared.czero : shared.cone);   // 通知客户端
     signalModifiedKey(c->db,c->argv[1]);    // 通知数据变更 用于事务
     notifyKeyspaceEvent(NOTIFY_HASH,"hset",c->argv[1],c->db->id);   // 推送变更订阅消息
-    server.dirty++; // service 执行命令数量加1
+    server.dirty++;
 }
 ```
 其中`hashTypeLookupWriteOrCreate`用于从db中查找对应数据，如果不存在就创建一个
@@ -265,71 +245,55 @@ void hashTypeTryConversion(robj *o, robj **argv, int start, int end) {  // 尝�
 在`hsetCommand`中，调用了`hashTypeSet`函数，这是真正往hash对象中添加数据的函数  
 
 ```c
-int hashTypeSet(robj *o, sds field, sds value, int flags) { // 往hash对象中添加数据
+int hashTypeSet(robj *o, robj *field, robj *value) {    // 设置一个hash值，如果存在就进行更新
     int update = 0;
 
-    if (o->encoding == OBJ_ENCODING_ZIPLIST) {  // 压缩表编码
+    if (o->encoding == OBJ_ENCODING_ZIPLIST) {
         unsigned char *zl, *fptr, *vptr;
+
+        field = getDecodedObject(field);
+        value = getDecodedObject(value);
 
         zl = o->ptr;
         fptr = ziplistIndex(zl, ZIPLIST_HEAD);
         if (fptr != NULL) {
-            fptr = ziplistFind(fptr, (unsigned char*)field, sdslen(field), 1);  // 查找是否存在对应hash field
+            fptr = ziplistFind(fptr, field->ptr, sdslen(field->ptr), 1);    // 查找是否存在对应hash field
             if (fptr != NULL) {
-                vptr = ziplistNext(zl, fptr);   // value存储在field后
+                /* Grab pointer to the value (fptr points to the field) */
+                vptr = ziplistNext(zl, fptr);    // value存储在field后
                 serverAssert(vptr != NULL);
                 update = 1;
 
+                /* Delete value */
                 zl = ziplistDelete(zl, &vptr);  // 删除存在的值
 
-                zl = ziplistInsert(zl, vptr, (unsigned char*)value, // 插入新值
-                        sdslen(value));
+                /* Insert new value */
+                zl = ziplistInsert(zl, vptr, value->ptr, sdslen(value->ptr));   // 插入新值
             }
         }
 
         if (!update) {  // 新增 field和value连续存储 filed在前 value在后 插入ziplist的尾部
-            zl = ziplistPush(zl, (unsigned char*)field, sdslen(field),
-                    ZIPLIST_TAIL);
-            zl = ziplistPush(zl, (unsigned char*)value, sdslen(value),
-                    ZIPLIST_TAIL);
+            /* Push new field/value pair onto the tail of the ziplist */
+            zl = ziplistPush(zl, field->ptr, sdslen(field->ptr), ZIPLIST_TAIL);
+            zl = ziplistPush(zl, value->ptr, sdslen(value->ptr), ZIPLIST_TAIL);
         }
         o->ptr = zl;
+        decrRefCount(field);
+        decrRefCount(value);
 
-        if (hashTypeLength(o) > server.hash_max_ziplist_entries)    // 如果hash中的元素大于512个，转换为ht字典编码
+        /* Check if the ziplist needs to be converted to a hash table */
+        if (hashTypeLength(o) > server.hash_max_ziplist_entries)    // 新增是校验zip保存的对象是否超过512个,超过需要转化dict
             hashTypeConvert(o, OBJ_ENCODING_HT);
-    } else if (o->encoding == OBJ_ENCODING_HT) {    // ht字典编码
-        dictEntry *de = dictFind(o->ptr,field); // 查找对应field
-        if (de) {
-            sdsfree(dictGetVal(de));
-            if (flags & HASH_SET_TAKE_VALUE) {  // 直接使用传入的数据
-                dictGetVal(de) = value;
-                value = NULL;
-            } else {
-                dictGetVal(de) = sdsdup(value); // 需要新申请数据空间 复制数据
-            }
+    } else if (o->encoding == OBJ_ENCODING_HT) {
+        if (dictReplace(o->ptr, field, value)) { /* Insert */
+            incrRefCount(field);
+        } else { /* Update */
             update = 1;
-        } else {    // 不存在新增
-            sds f,v;
-            if (flags & HASH_SET_TAKE_FIELD) {
-                f = field;
-                field = NULL;
-            } else {
-                f = sdsdup(field);
-            }
-            if (flags & HASH_SET_TAKE_VALUE) {
-                v = value;
-                value = NULL;
-            } else {
-                v = sdsdup(value);
-            }
-            dictAdd(o->ptr,f,v);    // 添加到hash的字典中
         }
+        incrRefCount(value);
     } else {
         serverPanic("Unknown hash encoding");
     }
-
-    if (flags & HASH_SET_TAKE_FIELD && field) sdsfree(field);   // 释放没有用的field和value
-    if (flags & HASH_SET_TAKE_VALUE && value) sdsfree(value);
     return update;
 }
 ```
@@ -354,9 +318,9 @@ void saddCommand(client *c) {   // sadd
     int j, added = 0;
 
     set = lookupKeyWrite(c->db,c->argv[1]); // 从DB中查找对应key
-    if (set == NULL) {  // 不存在 创建
-        set = setTypeCreate(c->argv[2]->ptr);   // 将要添加的第一个元素作为判断依据
-        dbAdd(c->db,c->argv[1],set);    // 添加到db中
+    if (set == NULL) {
+        set = setTypeCreate(c->argv[2]);    // 将要添加的第一个元素作为判断依据
+        dbAdd(c->db,c->argv[1],set);
     } else {
         if (set->type != OBJ_SET) {
             addReply(c,shared.wrongtypeerr);
@@ -364,11 +328,12 @@ void saddCommand(client *c) {   // sadd
         }
     }
 
-    for (j = 2; j < c->argc; j++) { // 添加元素
-        if (setTypeAdd(set,c->argv[j]->ptr)) added++;
+    for (j = 2; j < c->argc; j++) {
+        c->argv[j] = tryObjectEncoding(c->argv[j]); // 尝试对值进行压缩编码
+        if (setTypeAdd(set,c->argv[j])) added++;
     }
     if (added) {
-        signalModifiedKey(c->db,c->argv[1]);    // 事务 数据变更通知
+        signalModifiedKey(c->db,c->argv[1]);     // 事务 数据变更通知
         notifyKeyspaceEvent(NOTIFY_SET,"sadd",c->argv[1],c->db->id);    // 下发变更订阅消息
     }
     server.dirty += added;  // 增加执行命令数量
@@ -378,8 +343,8 @@ void saddCommand(client *c) {   // sadd
 其中`setTypeCreate`是根据添加数据的类型，选择创建不同的set对象
 
 ```c
-robj *setTypeCreate(sds value) {    // 根据添加的数据类型创建set对象
-    if (isSdsRepresentableAsLongLong(value,NULL) == C_OK)
+robj *setTypeCreate(robj *value) {  // 根据添加的数据类型创建set对象
+    if (isObjectRepresentableAsLongLong(value,NULL) == C_OK)    // 如果是整数
         return createIntsetObject();
     return createSetObject();
 }
@@ -401,34 +366,33 @@ robj *createIntsetObject(void) {    // 创建intset的set对象
 `setTypeAdd`和hash对象的`hashTypeSet`类似，都是在插入数据的时候根据数据type或数据数量判断是否需要转换为hashTable
 
 ```c
-int setTypeAdd(robj *subject, sds value) {  // 往set对象中添加数据
+int setTypeAdd(robj *subject, robj *value) {    // 往set对象中添加数据
     long long llval;
     if (subject->encoding == OBJ_ENCODING_HT) { // hashTable 对dict的简单封装
-        dict *ht = subject->ptr;
-        dictEntry *de = dictAddRaw(ht,value,NULL);
-        if (de) {
-            dictSetKey(ht,de,sdsdup(value));
-            dictSetVal(ht,de,NULL);
+        if (dictAdd(subject->ptr,value,NULL) == DICT_OK) {
+            incrRefCount(value);
             return 1;
         }
     } else if (subject->encoding == OBJ_ENCODING_INTSET) {
-        if (isSdsRepresentableAsLongLong(value,&llval) == C_OK) {   // 带插入的是数字
+        if (isObjectRepresentableAsLongLong(value,&llval) == C_OK) {     // 待插入的是数字
             uint8_t success = 0;
-            subject->ptr = intsetAdd(subject->ptr,llval,&success);  // 添加数据 
+            subject->ptr = intsetAdd(subject->ptr,llval,&success);  // 添加数据
             if (success) {
                 /* Convert to regular set when the intset contains
                  * too many entries. */
-                if (intsetLen(subject->ptr) > server.set_max_intset_entries)    // 大于set_max_intset_entries转换为hashTable 默认512
+                if (intsetLen(subject->ptr) > server.set_max_intset_entries)    // 个数大于set_max_intset_entries时转换为hash，默认为512
                     setTypeConvert(subject,OBJ_ENCODING_HT);    // 转换为hashTable
                 return 1;
             }
-        } else {
+        } else {    // 如果插入的不是int，进行转换
             /* Failed to get integer from object, convert to regular set. */
-            setTypeConvert(subject,OBJ_ENCODING_HT);    // 转换为hashTable
+            setTypeConvert(subject,OBJ_ENCODING_HT);
 
             /* The set *was* an intset and this value is not integer
              * encodable, so dictAdd should always work. */
-            serverAssert(dictAdd(subject->ptr,sdsdup(value),NULL) == DICT_OK);  // 添加数据
+            serverAssertWithInfo(NULL,value,
+                                dictAdd(subject->ptr,value,NULL) == DICT_OK);   // 添加数据
+            incrRefCount(value);
             return 1;
         }
     } else {
@@ -453,25 +417,25 @@ zset的有ziplist和skiplist两种编码方式。其中skiplist的编码方式�
 ### zadd
 
 ```c
-void zaddGenericCommand(client *c, int flags) { // zadd和zincrby共用的通用函数
-    // 各种初始化和对附加参数的处理
-    scores = zmalloc(sizeof(double)*elements);  // 将分值保存为double
+void zaddGenericCommand(client *c, int flags) { // 通用的添加函数
+    // 省略各种初始化和对附加参数的处理
+    scores = zmalloc(sizeof(double)*elements);  // 将分值保存在double中
     for (j = 0; j < elements; j++) {
         if (getDoubleFromObjectOrReply(c,c->argv[scoreidx+j*2],&scores[j],NULL)
             != C_OK) goto cleanup;
     }
 
-    zobj = lookupKeyWrite(c->db,key);   // 从DB中查找数据
-    if (zobj == NULL) {
+    zobj = lookupKeyWrite(c->db,key);
+    if (zobj == NULL) { // zset不存在新建
         if (xx) goto reply_to_client; /* No key + XX option: nothing to do. */
         if (server.zset_max_ziplist_entries == 0 ||
             server.zset_max_ziplist_value < sdslen(c->argv[scoreidx+1]->ptr))
-        {   // 如果设定的ziplist允许个数为0或带插入元素长度大于64byte
-            zobj = createZsetObject();  // 创建skiplist编码的zset对象
-        } else {
-            zobj = createZsetZiplistObject();   // 创建ziplist编码的zset对象
+        {   // 长度超过zset_max_ziplist_value 默认为64 或者zset_max_ziplist_entries被设置为0时创建跳跃表zset
+            zobj = createZsetObject();
+        } else {    // 创建压缩表zset
+            zobj = createZsetZiplistObject();
         }
-        dbAdd(c->db,key,zobj);  // 添加到db中
+        dbAdd(c->db,key,zobj);
     } else {
         if (zobj->type != OBJ_ZSET) {
             addReply(c,shared.wrongtypeerr);
@@ -480,26 +444,84 @@ void zaddGenericCommand(client *c, int flags) { // zadd和zincrby共用的通用
     }
 
     for (j = 0; j < elements; j++) {
-        double newscore;
-        score = scores[j];  // 待插入元素分值
-        int retflags = flags;
+        score = scores[j];
+        if (zobj->encoding == OBJ_ENCODING_ZIPLIST) {   // 压缩表
+            unsigned char *eptr;
 
-        ele = c->argv[scoreidx+1+j*2]->ptr; // 待插入元素数据
-        int retval = zsetAdd(zobj, score, ele, &retflags, &newscore);   // 添加元素
-        if (retval == 0) {
-            addReplyError(c,nanerr);
-            goto cleanup;
+            ele = c->argv[scoreidx+1+j*2];
+            if ((eptr = zzlFind(zobj->ptr,ele,&curscore)) != NULL) {    // 存在
+                if (nx) continue;
+                if (incr) {
+                    score += curscore;
+                    if (isnan(score)) {
+                        addReplyError(c,nanerr);
+                        goto cleanup;  // 出错直接跳到结尾清理内存空间
+                    }
+                }
+
+                if (score != curscore) { // 分值变化，直接删了重新插入
+                    zobj->ptr = zzlDelete(zobj->ptr,eptr);
+                    zobj->ptr = zzlInsert(zobj->ptr,ele,score);
+                    server.dirty++;
+                    updated++;
+                }
+                processed++;
+            } else if (!xx) {   // 新增
+                zobj->ptr = zzlInsert(zobj->ptr,ele,score);
+                if (zzlLength(zobj->ptr) > server.zset_max_ziplist_entries) // 如果长度超过zset_max_ziplist_entries 进行转换 默认64字节
+                    zsetConvert(zobj,OBJ_ENCODING_SKIPLIST);
+                if (sdslen(ele->ptr) > server.zset_max_ziplist_entries)   // 如果字符串长度超过zset_max_ziplist_entries 进行转换 默认128个
+                    zsetConvert(zobj,OBJ_ENCODING_SKIPLIST);
+                server.dirty++;
+                added++;
+                processed++;
+            }
+        } else if (zobj->encoding == OBJ_ENCODING_SKIPLIST) {   // 跳跃表
+            zset *zs = zobj->ptr;
+            zskiplistNode *znode;
+            dictEntry *de;
+
+            ele = c->argv[scoreidx+1+j*2] = tryObjectEncoding(c->argv[scoreidx+1+j*2]);  // 尝试对值进行压缩编码
+            de = dictFind(zs->dict,ele);
+            if (de != NULL) {
+                if (nx) continue;
+                curobj = dictGetKey(de);
+                curscore = *(double*)dictGetVal(de);
+
+                if (incr) {
+                    score += curscore;
+                    if (isnan(score)) {
+                        addReplyError(c,nanerr);
+                        goto cleanup;	// 出错直接跳到结尾清理内存空间
+                    }
+                }
+
+                if (score != curscore) {
+                    serverAssertWithInfo(c,curobj,zslDelete(zs->zsl,curscore,curobj));
+                    znode = zslInsert(zs->zsl,score,curobj);    // 新增一个跳跃表节点
+                    incrRefCount(curobj); /* Re-inserted in skiplist. */    // 将原来的跳跃表节点引用计数减一
+                    dictGetVal(de) = &znode->score; /* Update score ptr. */ // 将字典指向新的节点
+                    server.dirty++;
+                    updated++;
+                }
+                processed++;
+            } else if (!xx) {
+                znode = zslInsert(zs->zsl,score,ele);   // 添加到跳跃表中
+                incrRefCount(ele); // 引用计数加一
+                serverAssertWithInfo(c,NULL,dictAdd(zs->dict,ele,&znode->score) == DICT_OK);    // 插入一个元素到hashTable中 具体数据为key 分值为value
+                incrRefCount(ele); // 引用计数加一
+                server.dirty++;
+                added++;
+                processed++;
+            }
+        } else {
+            serverPanic("Unknown sorted set encoding");
         }
-        if (retflags & ZADD_ADDED) added++;
-        if (retflags & ZADD_UPDATED) updated++;
-        if (!(retflags & ZADD_NOP)) processed++;
-        score = newscore;
     }
-    server.dirty += (added+updated);
-    // 一些数据清理和通知操作
+    // 省略一些数据清理和通知操作
 }
 ```
-`createZsetZiplistObject`就是同其他对象创建函数，将一个ziplist添加到object中。而`createZsetObject`略有不同，创建了一个`zset`结构体，并持有一个skiplist指针和一个hashTable指针 
+`createZsetZiplistObject`和其他对象创建函数相同，将一个ziplist指针赋值给object的ptr属性。而`createZsetObject`略有不同，创建了一个`zset`结构体，持有一个skiplist指针和一个hashTable指针 
 
 ```c
 typedef struct zset {   // zset结构体
@@ -517,26 +539,8 @@ robj *createZsetObject(void) {  // 创建一个skiplist编码的zset
     return o;
 }
 ```
-skiplist是有序存储的数据结构，可以通过skiplist可以很简单的完成范围操作。但是如果需要获取制定数据的分值，例如`ZSCORE`命令，如果只用skiplist结构存储数据，时间复杂度为`O(logN)`。而这种场景下，hash的时间复杂度为`O(1)`。通过利用两种数据结构存储数据，是的zset在执行两种类型操作的时候效率都不会太低。  
+skiplist是有序存储的数据结构，可以通过skiplist可以很简单的完成范围操作。但是如果需要获取确定数据的分值，例如`ZSCORE`命令，如果只用skiplist结构存储数据，时间复杂度为`O(logN)`。而这种场景下，hash的时间复杂度为`O(1)`。通过利用两种数据结构存储数据，是的zset在执行两种类型操作的时候效率都不会太低。  
 虽然zset用两种数据结构持有数据，但在实际存储的时候只会存储一份数据，hashTable和skiplist共享元素的分值和数据。
-
-在`zsetAdd`函数中，可以看到当编码为skiplist新增数据时：  
-
-```c
-// ...
-znode = zslInsert(zs->zsl,score,ele);   // 插入一个元素到ziplist中
-serverAssert(dictAdd(zs->dict,ele,&znode->score) == DICT_OK);   // 插入一个元素到hashTable中 具体数据为key 分值为value
-// ...
-```
-
-而当编码为ziplist时，转换的条件为：
-
-```c
-if (zzlLength(zobj->ptr) > server.zset_max_ziplist_entries) // 元素数量大于128
-zsetConvert(zobj,OBJ_ENCODING_SKIPLIST);    // 转换为skiplist编码
-if (sdslen(ele) > server.zset_max_ziplist_value)    // 大于64byte
-zsetConvert(zobj,OBJ_ENCODING_SKIPLIST);
-```
 
 ### 小结一波
 * 当zset对象的所有元素都数据长度小于64byte且元素数量少于128时会采用ziplist编码，否则会采用skiplist编码
@@ -547,3 +551,139 @@ zsetConvert(zobj,OBJ_ENCODING_SKIPLIST);
 > zset相关api文档可见：[redis文档](http://www.redis.cn/commands.html#sorted_set)
 
 具体api源码在`t_zset.c`中
+
+# 对象销毁
+*redis* 采用了简单的引用计数，通过`redisObject`结构体中的`refcount`对对象的引用进行计数，当引用计数为0时就将对象销毁。  
+
+ * 当创建一个对象时，引用计数会被初始化为1  
+ * 当对象被重复使用时，会对引用计数进行加一
+ * 当对象不再被使用时，会对引用计数进行减一
+ * 引用计数为0时，对象所占的内存你会被释放
+
+```c
+void decrRefCount(robj *o) {    // 引用计数减一
+    if (o->refcount <= 0) serverPanic("decrRefCount against refcount <= 0");
+    if (o->refcount == 1) { // 当引用计数为1的时候直接释放
+        switch(o->type) {
+        case OBJ_STRING: freeStringObject(o); break;
+        case OBJ_LIST: freeListObject(o); break;
+        case OBJ_SET: freeSetObject(o); break;
+        case OBJ_ZSET: freeZsetObject(o); break;
+        case OBJ_HASH: freeHashObject(o); break;
+        default: serverPanic("Unknown object type"); break;
+        }
+        zfree(o);
+    } else {
+        o->refcount--;
+    }
+}
+```
+
+*redis* 的引用计数十分简单，没有PHP等语言引用计数的复杂染色机制。主要是因为所有对象都是由 *redis* 自己创建和维护的，不会出现复杂的循环引用场景。
+
+# 共享对象
+
+在 *redis* 中有一种特殊的对象，在server初始化的时候创建很多常用的数据，用于全局共享。这部分数据不会被销毁，主要用于server的各种运行标识和用户数据存储。从而起到节省内存目的，比满大街的破铜烂铁不知道高到哪里去。  
+例如在string对象中，在创建一个数字时，会判断是否在`shared.integers`的范围中，如果命中就不进行对象创建，直接使用对应的共享对象，并将引用计数加一
+
+```c
+if ((server.maxmemory == 0 ||
+        !(server.maxmemory_policy & MAXMEMORY_FLAG_NO_SHARED_INTEGERS)) &&
+        value >= 0 &&
+        value < OBJ_SHARED_INTEGERS)
+    {   // 使用shared数据，节省内存
+        decrRefCount(o);  // 销毁之前创建的字符串对象
+        incrRefCount(shared.integers[value]);  // 共享对象引用计数加一
+        return shared.integers[value];  // 返回共享对象
+    }
+```
+
+`shared.integers`的默认范围为0-9999  
+
+```
+#define OBJ_SHARED_INTEGERS 10000
+for (j = 0; j < OBJ_SHARED_INTEGERS; j++) {
+    shared.integers[j] =
+        makeObjectShared(createObject(OBJ_STRING,(void*)(long)j));
+    shared.integers[j]->encoding = OBJ_ENCODING_INT;
+}
+```
+
+除了用于共享存储数据的`shared.integers`，还有很多用于redisServer运行的字符串常量  
+
+```c
+shared.crlf = createObject(OBJ_STRING,sdsnew("\r\n"));
+shared.ok = createObject(OBJ_STRING,sdsnew("+OK\r\n"));
+shared.err = createObject(OBJ_STRING,sdsnew("-ERR\r\n"));
+// ...
+```
+可以自行查看`server.c`中的`createSharedObjects`函数。
+
+# LRU
+`redisObject`中的lru属性专门用来记录对象的被访问情况，lru保存了最近一次对象被正常访问的时间：  
+
+```c
+#define LRU_BITS 24
+typedef struct redisObject {    // redis对象
+    // ...
+    unsigned lru:LRU_BITS; /* lru time (relative to server.lruclock) */
+    // ...
+} robj;
+```
+如果 *redis* 设定了`maxmemory`数值，且`maxmemory-policy`设置为`allkeys-lru`或`volatile-lru`时，*redis* 会根据对象中的`lru`属性对DB中的数据进行淘汰。
+
+在每次正常访问数据时，都会更新对应数据的lru时钟  
+
+```c
+robj *lookupKey(redisDb *db, robj *key, int flags) {    // 从DB中查找对应key
+    dictEntry *de = dictFind(db->dict,key->ptr);
+    if (de) {   // 如果存在
+        robj *val = dictGetVal(de);
+
+        if (server.rdb_child_pid == -1 &&
+            server.aof_child_pid == -1 &&
+            !(flags & LOOKUP_NOTOUCH))
+        {	// 当有rdb和aof子进程在运行时，不进行lru更新
+            val->lru = LRU_CLOCK(); // 更新lru时间
+        }
+        return val;
+    } else {
+        return NULL;
+    }
+}
+```
+`object`命令比较特殊，这个命令可以查看key对应的对象的状态：引用计数、编码和lru时钟和系统时钟的时差。这个命令在访问数据的时候并不会更新lru时钟，因为其直接对DB进行查找操作，并没有通过`db.c`封装的函数进行访问。
+
+```c
+void objectCommand(client *c) { // object操作对应的函数
+    robj *o;
+
+    if (!strcasecmp(c->argv[1]->ptr,"refcount") && c->argc == 3) {  // 获取对象的引用计数
+        if ((o = objectCommandLookupOrReply(c,c->argv[2],shared.nullbulk))
+                == NULL) return;
+        addReplyLongLong(c,o->refcount);
+    } else if (!strcasecmp(c->argv[1]->ptr,"encoding") && c->argc == 3) {   // 获取对象的编码
+        if ((o = objectCommandLookupOrReply(c,c->argv[2],shared.nullbulk))
+                == NULL) return;
+        addReplyBulkCString(c,strEncoding(o->encoding));
+    } else if (!strcasecmp(c->argv[1]->ptr,"idletime") && c->argc == 3) {   // 获取对象lru和系统lru时间的差值
+        if ((o = objectCommandLookupOrReply(c,c->argv[2],shared.nullbulk))
+                == NULL) return;
+        addReplyLongLong(c,estimateObjectIdleTime(o)/1000);
+    } else {
+        addReplyError(c,"Syntax error. Try OBJECT (refcount|encoding|idletime)");
+    }
+}
+
+robj *objectCommandLookup(client *c, robj *key) {   // 从DB中查找对应数据对象
+    dictEntry *de;
+    if ((de = dictFind(c->db->dict,key->ptr)) == NULL) return NULL; // 直接查找db
+    return (robj*) dictGetVal(de);
+}
+
+robj *objectCommandLookupOrReply(client *c, robj *key, robj *reply) {   // 获取object，如果不存在reply
+    robj *o = objectCommandLookup(c,key);
+    if (!o) addReply(c, reply);
+    return o;
+}
+```
