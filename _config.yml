@@ -703,6 +703,6 @@ images: assets/images
 # Theme version
 version: 5.1.1
 
-reward_comment: 微信打赏还是要有的，说不定您觉得我的逼装的还不错呢？！
-wechatpay: /images/wechat_reward.jpeg
+#reward_comment: 微信打赏还是要有的，说不定您觉得我的逼装的还不错呢？！
+#wechatpay: /images/wechat_reward.jpeg
 #alipay: /images/alipay_rewar.jpeg
