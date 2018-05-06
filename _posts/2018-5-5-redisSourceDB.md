@@ -302,3 +302,5 @@ static int dictGenericDelete(dict *d, const void *key, int nofree)  // 移除一
 3. `redisDb`的具体键值对和过期时间分别存储在dict和expires两个属性中，两者共用key对象
 4. *redis* 通过惰性删除和定期删除两种方式清除过期的键值对
 5. 通过给expires和dict属性注入不同的`dictType`，使得删除expires的时候并不会清除共用的key对象
+
+数据结构的相关定义都在`server.h`中，其他一些db操作基本都在`db.c`中，想要深究可以自行查看源码~
