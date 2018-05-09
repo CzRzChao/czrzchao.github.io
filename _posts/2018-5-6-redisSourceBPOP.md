@@ -399,8 +399,12 @@ void handleClientsBlockedOnLists(void) {    // 处理list阻塞弹出返回
 ```
 
 # 小结一波
-由于redisServer和redisDb是1对多的关系，而redisDb和redisClient又是一对多的关系，因此为了方便遍历和查找，redisServer、redisDb和redisClient都需要保存当前阻塞的相关信息，只不过维度和数据结构略有不同：
+一个阻塞命令涉及到的数据结构图如下：
 ![bpop](/images/bpop.png)
 
+* redisServer都是遍历需求，因此采用list作为存储结构。其中ready_keys需要key加db才能确定一个唯一阻塞值，因此list元素为一个简单的结构体。
+* redisDb的blocking_keys用于存储单个db的阻塞key，有精确查找需求，采用dict作为基础数据结构。由于db的阻塞key和client为1对多关系，blocking_keys的value为clients的list。
+* redisDb的ready_keys只是起到一个单纯的去重逻辑，db是key阻塞的单位，因此去重逻辑放在db结构体中最为合适。采用dict存储，将value置为NULL，只用到dict的索引的。
+* client中的flags和btype用于记录阻塞的一些状态标志，bpop为一个复杂结构体，保存着阻塞超时时间和阻塞keys等，其中keys为dict数据结构，value为NULL，同db的ready_keys。
 
 
