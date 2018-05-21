@@ -11,11 +11,10 @@ tags:
 今天三旬老汉又双叒叕绝杀了！开心！再水一篇！  
 在前一篇文章中，提到了`redisDb`中有两个属性是专门用于阻塞命令的，本文就探究一下阻塞命令的实现。
 
-# 阻塞命令定义  
+# 阻塞命令
 *redis* 针对list类型，实现了`BLPOP`、`BRPOP`和`BRPOPLPUSH`三个特殊的阻塞命令，这些命令是`LPOP`等命令的阻塞版本，在给定list中没有任何数据供弹出时就会阻塞，直到有值或超时断开。  
-首先这个阻塞并不是redisServer阻塞，否则单进程的redis一旦阻塞，就无法正常提供数据库服务了，完全得不偿失。阻塞的是client，服务端仍然能正常提供服务。  
 私认为这个阻塞命令配合普通的`LPOP`等命令比订阅发布更适合做为消息队列，并且还能通过阻塞命令避免轮训或设定优先级高的消费者。
-以`BLPOP`为例探究一波内部实现，
+以`BLPOP`为例探究一波内部实现。
 
 # BLPOP
 `BLPOP`和`BRPOP`最终会调用同一个通用函数`blockingPopGenericCommand`：
@@ -31,48 +30,19 @@ void blockingPopGenericCommand(client *c, int where) {  // RPOP和LPOP的通用�
     // 处理所有监听的key
     for (j = 1; j < c->argc-1; j++) {
         o = lookupKeyWrite(c->db,c->argv[j]);   // 查找是否存在对应list
-        if (o != NULL) {
-            if (o->type != OBJ_LIST) {
+        if (o != NULL) {	// 存在对应key
+            if (o->type != OBJ_LIST) {	// 非list
                 addReply(c,shared.wrongtypeerr);
                 return;
             } else {
-                if (listTypeLength(o) != 0) {   // 如果存在能够弹出的值 基本同lpop
-                    /* Non empty list, this is like a non normal [LR]POP. */
-                    char *event = (where == LIST_HEAD) ? "lpop" : "rpop";
-                    robj *value = listTypePop(o,where);
-                    serverAssert(value != NULL);
-
-                    addReplyMultiBulkLen(c,2);
-                    addReplyBulk(c,c->argv[j]);
-                    addReplyBulk(c,value);
-                    decrRefCount(value);
-                    notifyKeyspaceEvent(NOTIFY_LIST,event,
-                                        c->argv[j],c->db->id);
-                    if (listTypeLength(o) == 0) {
-                        dbDelete(c->db,c->argv[j]);
-                        notifyKeyspaceEvent(NOTIFY_GENERIC,"del",
-                                            c->argv[j],c->db->id);
-                    }
-                    signalModifiedKey(c->db,c->argv[j]);
-                    server.dirty++;
-
-                    /* Replicate it as an [LR]POP instead of B[LR]POP. */
-                    rewriteClientCommandVector(c,2,
-                        (where == LIST_HEAD) ? shared.lpop : shared.rpop,
-                        c->argv[j]);
-                    return;
-                }
+                // 普通pop操作
             }
         }
     }
-
-    /* If we are inside a MULTI/EXEC and the list is empty the only thing
-     * we can do is treating it as a timeout (even with timeout 0). */
     if (c->flags & CLIENT_MULTI) {  // 如果在事务中直接返回
         addReply(c,shared.nullmultibulk);
         return;
     }
-
     blockForKeys(c, c->argv + 1, c->argc - 2, timeout, NULL);   // 如果key不存在或list为空阻塞
 }
 ```
