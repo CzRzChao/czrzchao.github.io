@@ -144,7 +144,7 @@ int rdbSaveBackground(char *filename) { // 子进程保存 非阻塞
 ```
 有个小细节，在退出子进程的时候，*redis* 采用的是`_exit`而不是`exit`，因为父进程可能对文件对象进行操作，`exit`会对清除IO缓存，可能会父进程造成影响。
 
-# save
+## save
 殊途同归，不论是自动触发还是SAVE和BGSAVE，最终都会走到`rdbSave`函数：
 
 ```c
@@ -209,9 +209,87 @@ werr:
 上述代码大部分为流程分支处理，要点有二：
 
 1. 通过先创建临时文件，写入后再原子性的rename，确保rdb文件都是完整可用的
-2. 出现了一个叫做rio的数据类型，并且初始化为file类型
+2. 出现了一个叫做rio的数据类型，并且被初始化为file类型
 
-`rio`是 *redis* 的io封装，所有socket、file、buffer的io都封装在`rio`中，rdb就是将rio初始化为file类型，进行文件的读写操作。除了`rio`，*redis* 还有对后台io操作封装的`bio`。
+## rio
+`rio`是 *redis* 的io封装，所有socket、file、buffer的io都封装在`rio`中，rdb就是将rio初始化为file类型，进行文件的读写操作。除了`rio`，*redis* 还有对后台io操作封装的`bio`。  
+
+```
+struct _rio {   // rio结构体
+    size_t (*read)(struct _rio *, void *buf, size_t len); // 读方法
+    size_t (*write)(struct _rio *, const void *buf, size_t len);
+    off_t (*tell)(struct _rio *);
+    int (*flush)(struct _rio *);
+    /* The update_cksum method if not NULL is used to compute the checksum of
+     * all the data that was read or written so far. The method should be
+     * designed so that can be called with the current checksum, and the buf
+     * and len fields pointing to the new block of data to add to the checksum
+     * computation. */
+    void (*update_cksum)(struct _rio *, const void *buf, size_t len);
+
+    /* The current checksum */
+    uint64_t cksum;
+
+    /* number of bytes read or written */
+    size_t processed_bytes; // 读写的累积bytes
+
+    /* maximum single read or write chunk size */
+    size_t max_processing_chunk;    // 一次io的最大长度
+
+    /* Backend-specific vars. */
+    union {
+        /* In-memory buffer target. */
+        struct {
+            sds ptr;
+            off_t pos;
+        } buffer;
+        /* Stdio file pointer target. */
+        struct {
+            FILE *fp;
+            off_t buffered; /* Bytes written since last fsync. */
+            off_t autosync; /* fsync after 'autosync' bytes written. */
+        } file;
+        /* Multiple FDs target (used to write to N sockets). */
+        struct {
+            int *fds;       /* File descriptors. */
+            int *state;     /* Error state of each fd. 0 (if ok) or errno. */
+            int numfds;
+            off_t pos;
+            sds buf;
+        } fdset;
+    } io;
+};
+
+typedef struct _rio rio;
+```
+
+以`file`类型的`rio`为例：  
+首先实例化一个`rio`对象会调用`rioInitWithFile`进行初始化：
+
+```
+void rioInitWithFile(rio *r, FILE *fp) {    // 初始化rioFileIO
+    *r = rioFileIO;
+    r->io.file.fp = fp;
+    r->io.file.buffered = 0;
+    r->io.file.autosync = 0;
+}
+```
+`rioFileIO`是一个定义了文件IO的结构体：
+
+```
+static const rio rioFileIO = {
+    rioFileRead,
+    rioFileWrite,
+    rioFileTell,
+    rioFileFlush,
+    NULL,           /* update_checksum */
+    0,              /* current checksum */
+    0,              /* bytes read or written */
+    0,              /* read/write chunk size */
+    { { NULL, 0 } } /* union for io-specific vars */
+};
+```
 
 
 # AOF
+

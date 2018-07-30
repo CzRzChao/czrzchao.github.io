@@ -3,11 +3,7 @@ title: about
 layout: page
 ---
 
-#关于blog
-> 坚持原创  
-> PHP是最好的语言！    
-> web开发者的装逼之路
 
-#联系我
-> QQ:358055120  
-> email:wu_chaoyi@163.com
+> PHP是世界上最好的语言！    
+> email:wu_chaoyi@163.com   
+> github:[CzRzChao](github.com/CzRzChao)
